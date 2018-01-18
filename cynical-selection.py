@@ -13,7 +13,7 @@ parser = argparse.ArgumentParser(description='Allomedia data selection tool')
 parser.add_argument('--task', required=True, type=str,
                     help='Task file, the sentences we want to mimic')
 parser.add_argument('--unadapted', required=True, type=str,
-                    help='Unadapted senteces, the pool we want to pick from')
+                    help='Unadapted sentences, the pool we want to pick from')
 parser.add_argument('--batch', action='store_true', dest='batch',
                     help='Set this flag to enable batch mode')
 parser.add_argument('--no-batch', action='store_false', dest='batch',
@@ -35,9 +35,43 @@ parser.add_argument('--maxlen', type=int, default=250,
                     help='Maximum sentence length')
 parser.add_argument('--smoothing', type=float, default=0.01,
                     help='Smoothing factor for lenght penalty computation')
+parser.add_argument('--iterate', action='store_true', dest='iterate',
+                    help=("Set this flag to iterate until we can't reduce " +
+                          "selected data by no more than 10%"))
+parser.add_argument('--no-iterate', action='store_false', dest='iterate',
+                    help='Set this flag to iterate on data only once')
+parser.set_defaults(iterate=False)
+
+
+def get_logger(args):
+    """Returns a file logger with DEBUG level.
+
+    args: argparse object containing the cmd arguments
+
+    returns: logger object
+    """
+    logger = logging.getLogger(__name__)
+    logger.setLevel('DEBUG')
+
+    logfile = logging.FileHandler(
+                    time.strftime('{}-{}-%Y%m%d_%H%M.log'.format(
+                        args.unadapted, args.task)), encoding='utf-8')
+    logfile.setLevel('DEBUG')
+    formatter = logging.Formatter(
+                    '%(asctime)s | %(message)s')
+    logfile.setFormatter(formatter)
+    logger.addHandler(logfile)
+
+    return logger
 
 
 def compute_counts(corpus):
+    """Compute the word counts and probs for a given corpus
+
+    corpus: list of sentences
+
+    returns: dict of words, containing counts & probs
+    """
     words = {}
     size = 0
 
@@ -50,7 +84,6 @@ def compute_counts(corpus):
                 words[token]['count'] = 1
             size += 1
 
-    # for item in sorted(words.items(), key=lambda x: (-x[1], x[0])):
     for k in words.keys():
         words[k]['prob'] = words[k]['count'] / size
 
@@ -58,6 +91,10 @@ def compute_counts(corpus):
 
 
 def float_to_str(num):
+    """Gets rid of exponent notation in floats
+
+    num: the float to return as a string
+    """
     with localcontext() as ctx:
         ctx.prec = 20
         d = ctx.create_decimal(repr(num))
@@ -215,7 +252,7 @@ def index_unadapted(squish, ratios, smoothing, penalty, logger):
         for token in count.keys():
             sge += (ratios[token]['hconstant'] * math.log(smoothing /
                                                           count[token]))
-            score = penalty[len(tokens)] + sge
+            score = penalty[len(tokens) - 1] + sge
             if 'line_list' not in ratios[token]:
                 ratios[token]['line_list'] = []
             ratios[token]['line_list'].append((score, sge, lineid))
@@ -252,8 +289,9 @@ def init_estimates(ratios, smoothing):
     return wge
 
 
-def main_loop(selected, pool, ratios, currmodel,
-              penalty, wge, smoothing, batch, logger):
+def select_data(pool, ratios, currmodel, penalty,
+                wge, smoothing, batch, logger):
+    selected = []
     maxiter = len(pool)
     linecount = 1
     currmodel_linecount = 0
@@ -294,7 +332,7 @@ def main_loop(selected, pool, ratios, currmodel,
                                      (currmodel[token]['count'] +
                                       count[token])))
                 pool[first_bestword_id]['SGE'] = sge
-                score_threshold = penalty[len(tokens)] + sge
+                score_threshold = penalty[len(tokens) - 1] + sge
                 logger.debug('SGE: {} => {}'.format(
                     ratios[bestword]['line_list'][i][1], sge))
                 logger.debug('score: {} => {}'.format(
@@ -349,7 +387,7 @@ def main_loop(selected, pool, ratios, currmodel,
                         math.log((currmodel[token]['count'] + smoothing) /
                                  (currmodel[token]['count'] + count[token])))
             pool[first_bestword_id]['SGE'] = sge
-            score = penalty[len(tokens)] + sge
+            score = penalty[len(tokens) - 1] + sge
             ratios[bestword]['line_list'][i] = (score, sge, lineid)
 
         n_lines_for_bestword = len(ratios[bestword]['line_list'])
@@ -374,13 +412,13 @@ def main_loop(selected, pool, ratios, currmodel,
                 ratios[bestword]['line_list'][new_sqrt_lines:]
 
             to_prune_again = []
-            for tup in goodlines:
+            for i, tup in enumerate(goodlines):
                 lineid = tup[2]
                 if lineid not in pool:
-                    to_prune_again.append(lineid)
+                    to_prune_again.append(i)
             while(to_prune_again):
                 i = to_prune_again.pop()
-                del goodlines[i:i + 1]
+                del goodlines[i]
                 logger.debug('Pruned the ghost of line {}'.format(i))
             logger.debug('Adding {} of {} lines to selected data'.format(
                 len(goodlines), n_lines_for_bestword))
@@ -400,8 +438,8 @@ def main_loop(selected, pool, ratios, currmodel,
             currmodel_score += score
             currmodel_wordcount += len(tokens)
             selected.append(
-                '{} {} {} {} {} {} {} {} {}'.format(
-                    currmodel_score, score, penalty[len(tokens)], sge,
+                '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(
+                    currmodel_score, score, penalty[len(tokens) - 1], sge,
                     currmodel_linecount, lineid + 1, bestword, WGE,
                     pool[lineid]['string']))
             del pool[lineid]
@@ -450,39 +488,7 @@ def main_loop(selected, pool, ratios, currmodel,
     return selected
 
 
-def main():
-    args = parser.parse_args()
-    logger = logging.getLogger(__name__)
-    logger.setLevel('DEBUG')
-
-    logfile = logging.FileHandler(
-                    time.strftime('{}-{}-%Y%m%d_%H%M.log'.format(
-                        args.task, args.unadapted)),
-                    encoding='utf-8')
-    logfile.setLevel('DEBUG')
-    formatter = logging.Formatter(
-                    '%(asctime)s | %(levelname)s | %(message)s')
-    logfile.setFormatter(formatter)
-    logger.addHandler(logfile)
-
-    with open(args.task, 'r') as task_file:
-        logger.debug('Loading task data {}'.format(args.task))
-        task_data = []
-        for line in task_file:
-            if args.lower:
-                task_data.append(line.strip().lower())
-            else:
-                task_data.append(line.strip())
-
-    with open(args.unadapted, 'r') as unadapted_file:
-        logger.debug('Loading unadapted data {}'.format(args.unadapted))
-        unadapted_data = []
-        for line in unadapted_file:
-            if args.lower:
-                unadapted_data.append(line.strip().lower())
-            else:
-                unadapted_data.append(line.strip())
-
+def main_loop(task_data, unadapted_data, args, logger):
     logger.debug('Computing vocabulary counts')
     task_vocab = compute_counts(task_data)
     unadapted_vocab = compute_counts(unadapted_data)
@@ -509,12 +515,61 @@ def main():
     del unadapted_squish
 
     logger.debug('Perform selection')
-    selected = []
-    selected = main_loop(selected, pool, ratios, currmodel, penalty, wge,
-                         args.smoothing, args.batch, logger)
+    selected = select_data(pool, ratios, currmodel, penalty, wge,
+                           args.smoothing, args.batch, logger)
 
+    return selected
+
+
+def load_data(data_file, lower, logger):
+    with open(data_file, 'r') as handle:
+        logger.debug('Loading data file {}'.format(data_file))
+        data = []
+        for line in handle:
+            if lower:
+                data.append(line.strip().lower())
+            else:
+                data.append(line.strip())
+    return data
+
+
+def unsquish(selected, unadapted_data):
+    for i, line in enumerate(selected):
+        items = line.split('\t')
+        items[8] = unadapted_data[int(items[5]) - 1]
+        selected[i] = '\t'.join(items)
+
+    return selected
+
+
+def extract_data(selected):
+    data = []
     for line in selected:
-        print(line)
+        data.append(line.split('\t')[8])
+
+    return data
+
+
+def main():
+    args = parser.parse_args()
+    logger = get_logger(args)
+    outname = '{}-{}.jaded'.format(args.unadapted, args.task)
+
+    task_data = load_data(args.task, args.lower, logger)
+    unadapted_data = load_data(args.unadapted, args.lower, logger)
+
+    max_selection = int(len(unadapted_data) * 0.9)
+    selected = main_loop(task_data, unadapted_data, args, logger)
+
+    if args.iterate:
+        while (len(selected) < max_selection):
+            unadapted_data = extract_data(unsquish(selected, unadapted_data))
+            max_selection = int(len(unadapted_data) * 0.9)
+            selected = main_loop(task_data, unadapted_data, args, logger)
+
+    with open(outname, 'w') as out:
+        for line in unsquish(selected, unadapted_data):
+            out.write(line + '\n')
 
 
 if __name__ == '__main__':
