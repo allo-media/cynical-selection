@@ -14,3 +14,8 @@ Usage would be:
 
 This will produce a `.jaded` file containing the selected sentences using the following tab-separated format:
 `model score` `sentence score (penalty + gain)` `length penalty` `sentence gain` `sentence id (in the selection)` `sentence id (in the unadapted corpus)` `best word` `word gain` `sentence`.
+
+See header of the script for available options, here is the two most important:
+
+`batch`: essential with big corpora, allows to select more than one sentence at a time, see Axelrod's paper
+`iterate`: iterate selection runs till no more than 10% of original size can be removed
