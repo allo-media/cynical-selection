@@ -6,7 +6,9 @@ import bisect
 import re
 import logging
 import time
+import multiprocessing
 from decimal import localcontext
+from itertools import chain, repeat
 
 
 parser = argparse.ArgumentParser(description='Allomedia data selection tool')
@@ -40,10 +42,36 @@ parser.add_argument('--iterate', action='store_true', dest='iterate',
                           "selected data by no more than 10%"))
 parser.add_argument('--no-iterate', action='store_false', dest='iterate',
                     help='Set this flag to iterate on data only once')
+parser.add_argument('--splitsize', type=int, default=2500000,
+                    help='Size of parts when splitting big corpora')
 parser.set_defaults(iterate=False)
 
 
-def get_logger(args):
+def singleton(cls):
+    instances = {}
+
+    def get_instance():
+        if cls not in instances:
+            instances[cls] = cls()
+        return instances[cls]
+    return get_instance()
+
+
+@singleton
+class Logger():
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel('DEBUG')
+
+    def add_fh(self, name):
+        logfile = logging.FileHandler(name, encoding='utf-8')
+        logfile.setLevel('DEBUG')
+        formatter = logging.Formatter('%(asctime)s | %(message)s')
+        logfile.setFormatter(formatter)
+        self.logger.addHandler(logfile)
+
+
+def get_logger(logname):
     """Returns a file logger with DEBUG level.
 
     args: argparse object containing the cmd arguments
@@ -53,12 +81,9 @@ def get_logger(args):
     logger = logging.getLogger(__name__)
     logger.setLevel('DEBUG')
 
-    logfile = logging.FileHandler(
-                    time.strftime('{}-{}-%Y%m%d_%H%M.log'.format(
-                        args.unadapted, args.task)), encoding='utf-8')
+    logfile = logging.FileHandler(logname, encoding='utf-8')
     logfile.setLevel('DEBUG')
-    formatter = logging.Formatter(
-                    '%(asctime)s | %(message)s')
+    formatter = logging.Formatter('%(asctime)s | %(message)s')
     logfile.setFormatter(formatter)
     logger.addHandler(logfile)
 
@@ -640,7 +665,7 @@ def select_data(pool, ratios, model, penalty,
     return selected
 
 
-def main_loop(task_data, unadapted_data, args, logger):
+def main_loop(task_data, unadapted_data, args):
     """Our main selection loop, which can be executed a number of times
 
     task_data: our list of task sentences
@@ -650,6 +675,8 @@ def main_loop(task_data, unadapted_data, args, logger):
 
     returns: the selected sentences
     """
+    # logger = get_logger(args.logname)
+    logger = Logger.logger
     logger.debug('Computing vocabulary counts')
     task_vocab = compute_counts(task_data)
     unadapted_vocab = compute_counts(unadapted_data)
@@ -727,10 +754,36 @@ def extract_data(selected):
     return data
 
 
+def split_data(a, n):
+    """Splits a list a in n parts
+    """
+    n = min(n, len(a))  # Don't create empty buckets
+    k, m = divmod(len(a), n)
+
+    return [a[i * k + min(i, m):(i + 1) * k + min(i + 1, m)]
+            for i in range(n)]
+
+
+def threading_wrapper(task_data, unadapted_data, args):
+    """Wraps the main loop for threading usage
+    """
+    n_parts = int(len(unadapted_data) / args.splitsize)
+    parts_list = split_data(unadapted_data, n_parts)
+    pool = multiprocessing.Pool(n_parts)
+    results = pool.starmap(main_loop,
+                           zip(repeat(task_data), parts_list, repeat(args)))
+    pool.close()
+    return list(chain(*results))
+
+
 def main():
     args = parser.parse_args()
-    logger = get_logger(args)
-    outname = '{}-{}.jaded'.format(args.unadapted, args.task)
+    args.logname = time.strftime('{}-{}-%Y%m%d_%H%M.log'.format(
+        args.unadapted, args.task))
+    Logger.add_fh(args.logname)
+    logger = Logger.logger
+    # logger = get_logger(args.logname)
+    args.outname = '{}-{}.jaded'.format(args.unadapted, args.task)
 
     # Load our data
     task_data = load_data(args.task, args.lower, logger)
@@ -739,17 +792,23 @@ def main():
     # Stop criterion
     # we stop when we're unable to remove more than 10% of data
     max_selection = int(len(unadapted_data) * 0.9)
-    selected = main_loop(task_data, unadapted_data, args, logger)
+    if len(unadapted_data) > args.splitsize:
+        selected = threading_wrapper(task_data, unadapted_data, args)
+    else:
+        selected = main_loop(task_data, unadapted_data, args)
 
     if args.iterate:
         # While we remove more than 10%, let's continue!
         while (len(selected) < max_selection):
             unadapted_data = extract_data(unsquish(selected, unadapted_data))
             max_selection = int(len(unadapted_data) * 0.9)
-            selected = main_loop(task_data, unadapted_data, args, logger)
+            if len(unadapted_data) > args.splitsize:
+                selected = threading_wrapper(task_data, unadapted_data, args)
+            else:
+                selected = main_loop(task_data, unadapted_data, args)
 
     # Write our output, the much awaited selected sentences!
-    with open(outname, 'w') as out:
+    with open(args.outname, 'w') as out:
         for line in unsquish(selected, unadapted_data):
             out.write(line + '\n')
 
