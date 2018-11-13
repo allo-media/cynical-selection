@@ -6,6 +6,7 @@ import bisect
 import re
 import logging
 import time
+import os.path as op
 import multiprocessing
 from decimal import localcontext
 from itertools import chain, repeat
@@ -314,7 +315,7 @@ def init_penalty(maxlen, smoothing):
 def count_tokens(tokens):
     """Count words into token lists
 
-    tokens: list of tokens (typîcally a sentence) to count
+    tokens: list of tokens (typically a sentence) to count
 
     returns: dict of words with individual counts
     """
@@ -779,11 +780,12 @@ def threading_wrapper(task_data, unadapted_data, args):
 def main():
     args = parser.parse_args()
     args.logname = time.strftime('{}-{}-%Y%m%d_%H%M.log'.format(
-        args.unadapted, args.task))
+        args.unadapted, op.basename(args.task)))
     Logger.add_fh(args.logname)
     logger = Logger.logger
     # logger = get_logger(args.logname)
-    args.outname = '{}-{}.jaded'.format(args.unadapted, args.task)
+    args.outname = '{}-{}.jaded'.format(args.unadapted,
+                                        op.basename(args.task))
 
     # Load our data
     task_data = load_data(args.task, args.lower, logger)
